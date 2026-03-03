@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 os.environ["NOTEBOOK_DB"] = str(Path(tempfile.mkdtemp()) / "test_notebooks.db")
 sys.path.insert(0, str(Path(__file__).parent))
-from main import Cell, JupyterService, Notebook, init_db
+from main import Cell, JupyterService, Notebook, OllamaService, init_db
 
 
 class TestCell(unittest.TestCase):
@@ -83,6 +83,67 @@ class TestJupyterService(unittest.TestCase):
         self.svc.notebook_execute(nb.id)
         hist = self.svc.execution_history(nb.id)
         self.assertGreaterEqual(len(hist), 1)
+
+
+class TestOllamaService(unittest.TestCase):
+    class _FakeOllamaResponse:
+        """Minimal stub for urllib.request.urlopen context manager."""
+        def __init__(self, response_text: str) -> None:
+            self._data = json.dumps({"response": response_text}).encode()
+
+        def read(self):
+            return self._data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+    def test_has_mention_ollama(self):
+        self.assertTrue(OllamaService.has_mention("@ollama what is 2+2?"))
+
+    def test_has_mention_copilot(self):
+        self.assertTrue(OllamaService.has_mention("@copilot explain recursion"))
+
+    def test_has_mention_lucidia(self):
+        self.assertTrue(OllamaService.has_mention("@lucidia summarize this"))
+
+    def test_has_mention_blackboxprogramming(self):
+        self.assertTrue(OllamaService.has_mention("@blackboxprogramming write a sort"))
+
+    def test_has_mention_case_insensitive(self):
+        self.assertTrue(OllamaService.has_mention("@Copilot help"))
+        self.assertTrue(OllamaService.has_mention("@OLLAMA test"))
+
+    def test_no_mention(self):
+        self.assertFalse(OllamaService.has_mention("x = 1 + 2"))
+        self.assertFalse(OllamaService.has_mention("print('hello')"))
+
+    def test_query_strips_mention_and_calls_ollama(self):
+        with patch("urllib.request.urlopen", return_value=self._FakeOllamaResponse("42")):
+            svc = OllamaService(base_url="http://localhost:11434", model="llama3")
+            text, status = svc.query("@ollama what is 6*7?")
+        self.assertEqual(status, "success")
+        self.assertEqual(text, "42")
+
+    def test_query_connection_error_returns_error_status(self):
+        import urllib.error
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("refused")):
+            svc = OllamaService(base_url="http://localhost:11434", model="llama3")
+            text, status = svc.query("@ollama hello")
+        self.assertEqual(status, "error")
+        self.assertIn("refused", text)
+
+    def test_run_cell_routes_mention_to_ollama(self):
+        with patch("urllib.request.urlopen", return_value=self._FakeOllamaResponse("ollama answer")):
+            output, status = JupyterService._run_cell("@copilot what is gravity?")
+        self.assertEqual(status, "success")
+        self.assertEqual(output, "ollama answer")
+
+    def test_run_cell_plain_python_not_routed(self):
+        output, status = JupyterService._run_cell("print('hello')")
+        self.assertEqual(status, "success")
+        self.assertIn("hello", output)
 
 
 if __name__ == "__main__":

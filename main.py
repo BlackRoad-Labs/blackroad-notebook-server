@@ -10,10 +10,13 @@ import base64
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -160,6 +163,62 @@ class Execution:
             finished_at=row["finished_at"],
             duration_ms=row["duration_ms"],
         )
+
+
+# ─────────────────────────────────────────────
+# Ollama integration
+# ─────────────────────────────────────────────
+
+# Mention triggers that route a cell to Ollama instead of the Python kernel.
+OLLAMA_MENTIONS = re.compile(
+    r"@(?:copilot|lucidia|blackboxprogramming|ollama)\b",
+    re.IGNORECASE,
+)
+
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3")
+
+
+class OllamaService:
+    """Routes AI prompts to a locally-running Ollama instance.
+
+    All @copilot, @lucidia, @blackboxprogramming, and @ollama mentions are
+    handled here — no external provider is involved.
+    """
+
+    def __init__(self, base_url: str = OLLAMA_URL, model: str = OLLAMA_MODEL) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+
+    @staticmethod
+    def has_mention(source: str) -> bool:
+        """Return True if the source contains an Ollama routing mention."""
+        return bool(OLLAMA_MENTIONS.search(source))
+
+    def query(self, prompt: str) -> tuple[str, str]:
+        """Send *prompt* to Ollama and return (response_text, status).
+
+        Status is 'success' on HTTP 200, 'error' otherwise.
+        The method strips the leading @mention before sending.
+        """
+        clean_prompt = OLLAMA_MENTIONS.sub("", prompt).strip()
+        payload = json.dumps({"model": self.model, "prompt": clean_prompt, "stream": False}).encode()
+        req = urllib.request.Request(
+            f"{self.base_url}/api/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                body = json.loads(resp.read().decode())
+                return body.get("response", ""), "success"
+        except urllib.error.HTTPError as exc:
+            return f"Ollama HTTP error {exc.code}: {exc.reason}", "error"
+        except urllib.error.URLError as exc:
+            return f"Ollama connection error: {exc.reason}", "error"
+        except Exception as exc:
+            return f"Ollama query failed: {exc}", "error"
 
 
 # ─────────────────────────────────────────────
@@ -328,7 +387,15 @@ class JupyterService:
 
     @staticmethod
     def _run_cell(source: str, timeout: int = 60) -> tuple[str, str]:
-        """Execute Python source code in a subprocess and capture output."""
+        """Execute a cell.
+
+        If the source contains an @copilot / @lucidia / @blackboxprogramming /
+        @ollama mention the request is routed to the local Ollama instance and
+        no external provider is consulted.  Plain code cells are executed in a
+        Python subprocess as before.
+        """
+        if OllamaService.has_mention(source):
+            return OllamaService().query(source)
         try:
             result = subprocess.run(
                 [sys.executable, "-c", source],
@@ -426,6 +493,20 @@ def cmd_kernels(args: argparse.Namespace) -> None:
         print(json.dumps(kernels, indent=2))
 
 
+def cmd_ollama(args: argparse.Namespace) -> None:
+    """Send a prompt directly to Ollama and print the response."""
+    svc = OllamaService(
+        base_url=args.url or OLLAMA_URL,
+        model=args.model or OLLAMA_MODEL,
+    )
+    response, status = svc.query(args.prompt)
+    if status == "success":
+        print(response)
+    else:
+        print(f"Error: {response}", file=sys.stderr)
+        sys.exit(1)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="notebook-server",
@@ -466,6 +547,13 @@ def build_parser() -> argparse.ArgumentParser:
     # kernels
     p = sub.add_parser("kernels", help="List registered kernels")
     p.set_defaults(func=cmd_kernels)
+
+    # ollama
+    p = sub.add_parser("ollama", help="Send a prompt directly to the local Ollama instance")
+    p.add_argument("prompt", help="Prompt text (may include @mention or plain text)")
+    p.add_argument("--url", default=None, help=f"Ollama base URL [default: {OLLAMA_URL}]")
+    p.add_argument("--model", default=None, help=f"Ollama model name [default: {OLLAMA_MODEL}]")
+    p.set_defaults(func=cmd_ollama)
 
     return parser
 
