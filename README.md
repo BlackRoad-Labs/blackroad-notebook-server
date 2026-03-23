@@ -1,5 +1,13 @@
 # blackroad-notebook-server
 
+> Jupyter notebook server with AI kernels
+
+Part of the [BlackRoad OS](https://blackroad.io) ecosystem — [BlackRoad-Labs](https://github.com/BlackRoad-Labs)
+
+---
+
+# blackroad-notebook-server
+
 ![CI](https://github.com/BlackRoad-Labs/blackroad-notebook-server/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-proprietary-red)
